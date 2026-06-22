@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KNotaçõesG
 // @namespace    https://github.com/Caio-Angelis/knotacoesg
-// @version      1.4.0
+// @version      1.5.0
 // @description  Anotações globais em qualquer site
 // @author       Caio-Angelis
 // @match        *://*/*
@@ -700,6 +700,10 @@
         touch-action: none !important;
       }
       .kng-pin:hover { background: #f0bc2a !important; }
+      .kng-pin.kng-pin-open {
+        background: #f0bc2a !important;
+        border-color: #1a1a2e !important;
+      }
       .kng-pin.kng-pin-dragging {
         cursor: grabbing !important;
         z-index: 2147483647 !important;
@@ -1247,90 +1251,74 @@
   function setupPinDrag(pin, entry) {
     const DRAG_THRESHOLD = 5;
 
-    const finishDrag = (moved, e) => {
-      pin.classList.remove('kng-pin-dragging');
-      document.removeEventListener('mousemove', onMove, true);
-      document.removeEventListener('mouseup', onEnd, true);
-      document.removeEventListener('touchmove', onMove, true);
-      document.removeEventListener('touchend', onEnd, true);
-      document.removeEventListener('touchcancel', onEnd, true);
-
-      if (moved && entry.annotationId) {
-        const updated = updateAnnotationAnchor(entry.annotationId, entry.anchor.x, entry.anchor.y);
-        if (updated) entry.annotation = updated;
-      } else if (!moved) {
-        showPinDetail(entry.annotation, { type: 'point', anchor: entry.anchor });
-      }
-      if (e) stopKngEvent(e);
-    };
-
-    let moved = false;
-    let startX = 0;
-    let startY = 0;
-
-    const onMove = (ev) => {
-      const cx = ev.clientX ?? ev.touches?.[0]?.clientX;
-      const cy = ev.clientY ?? ev.touches?.[0]?.clientY;
-      if (cx == null || cy == null) return;
-
-      if (Math.abs(cx - startX) + Math.abs(cy - startY) > DRAG_THRESHOLD) {
-        moved = true;
-        closePinDetailFor(entry.annotationId);
-      }
-
-      const pageX = cx + window.scrollX;
-      const pageY = cy + window.scrollY;
-      const norm = pageToNormalized(pageX, pageY);
-      entry.anchor.x = norm.x;
-      entry.anchor.y = norm.y;
-
-      const pos = normalizedToViewport(norm.x, norm.y);
-      pin.style.left = `${pos.left}px`;
-      pin.style.top = `${pos.top}px`;
-
-      if (ev.cancelable && ev.type === 'touchmove') ev.preventDefault();
-    };
-
-    const onEnd = (ev) => {
-      finishDrag(moved, ev);
-    };
-
-    const startDrag = (clientX, clientY, e) => {
+    pin.addEventListener('pointerdown', (e) => {
       if (ui.clickModeActive) return;
-      stopKngEvent(e);
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
 
-      moved = false;
-      startX = clientX;
-      startY = clientY;
+      e.preventDefault();
+      e.stopPropagation();
+
+      let moved = false;
+      const startX = e.clientX;
+      const startY = e.clientY;
+      const pointerId = e.pointerId;
+
+      try {
+        pin.setPointerCapture(pointerId);
+      } catch (_) {}
+
       pin.classList.add('kng-pin-dragging');
 
-      document.addEventListener('mousemove', onMove, true);
-      document.addEventListener('mouseup', onEnd, true);
-      document.addEventListener('touchmove', onMove, { passive: false, capture: true });
-      document.addEventListener('touchend', onEnd, true);
-      document.addEventListener('touchcancel', onEnd, true);
-    };
+      const onPointerMove = (ev) => {
+        if (ev.pointerId !== pointerId) return;
 
-    pin.addEventListener('mousedown', (e) => {
-      if (e.button !== 0) return;
-      startDrag(e.clientX, e.clientY, e);
+        if (Math.abs(ev.clientX - startX) + Math.abs(ev.clientY - startY) > DRAG_THRESHOLD) {
+          moved = true;
+        }
+
+        const pageX = ev.clientX + window.scrollX;
+        const pageY = ev.clientY + window.scrollY;
+        const norm = pageToNormalized(pageX, pageY);
+        entry.anchor.x = norm.x;
+        entry.anchor.y = norm.y;
+
+        const pos = normalizedToViewport(norm.x, norm.y);
+        pin.style.left = `${pos.left}px`;
+        pin.style.top = `${pos.top}px`;
+        updatePinDetailPosition(entry.annotationId, entry.anchor);
+      };
+
+      const onPointerUp = (ev) => {
+        if (ev.pointerId !== pointerId) return;
+
+        pin.classList.remove('kng-pin-dragging');
+        try {
+          pin.releasePointerCapture(pointerId);
+        } catch (_) {}
+
+        pin.removeEventListener('pointermove', onPointerMove);
+        pin.removeEventListener('pointerup', onPointerUp);
+        pin.removeEventListener('pointercancel', onPointerUp);
+
+        if (moved && entry.annotationId) {
+          const updated = updateAnnotationAnchor(entry.annotationId, entry.anchor.x, entry.anchor.y);
+          if (updated) entry.annotation = updated;
+        } else if (!moved) {
+          togglePinDetail(entry.annotation, { type: 'point', anchor: entry.anchor });
+        }
+      };
+
+      pin.addEventListener('pointermove', onPointerMove);
+      pin.addEventListener('pointerup', onPointerUp);
+      pin.addEventListener('pointercancel', onPointerUp);
     });
-
-    pin.addEventListener(
-      'touchstart',
-      (e) => {
-        const t = e.touches[0];
-        if (!t) return;
-        startDrag(t.clientX, t.clientY, e);
-      },
-      { passive: false }
-    );
   }
 
   function createPinElement(ann) {
-    const pin = document.createElement('button');
-    pin.type = 'button';
+    const pin = document.createElement('div');
     pin.className = 'kng-pin';
+    pin.setAttribute('role', 'button');
+    pin.tabIndex = 0;
     pin.dataset.kngPinId = ann.id;
     pin.title = `${ann.title} — arraste para mover`;
     pin.textContent = ann.title;
@@ -1412,18 +1400,41 @@
     });
   }
 
+  function isPinDetailOpen(annotationId) {
+    return !!document.querySelector(`.kng-pin-detail[data-kng-for="${annotationId}"]`);
+  }
+
+  function updatePinDetailPosition(annotationId, anchor) {
+    const detail = document.querySelector(`.kng-pin-detail[data-kng-for="${annotationId}"]`);
+    if (!detail || !anchor) return;
+    const pos = normalizedToViewport(anchor.x, anchor.y);
+    detail.style.left = `${Math.min(pos.left, window.innerWidth - 300)}px`;
+    detail.style.top = `${Math.min(pos.top + 16, window.innerHeight - 120)}px`;
+  }
+
   function closePinDetail() {
     document.querySelectorAll('.kng-pin-detail').forEach((el) => el.remove());
+    document.querySelectorAll('.kng-pin.kng-pin-open').forEach((el) => el.classList.remove('kng-pin-open'));
   }
 
   function closePinDetailFor(annotationId) {
     document
       .querySelectorAll(`.kng-pin-detail[data-kng-for="${annotationId}"]`)
       .forEach((el) => el.remove());
+    document
+      .querySelectorAll(`.kng-pin[data-kng-pin-id="${annotationId}"]`)
+      .forEach((el) => el.classList.remove('kng-pin-open'));
+  }
+
+  function togglePinDetail(annotation, anchorInfo) {
+    if (isPinDetailOpen(annotation.id)) {
+      closePinDetailFor(annotation.id);
+      return;
+    }
+    showPinDetail(annotation, anchorInfo);
   }
 
   function showPinDetail(annotation, anchorInfo) {
-    closePinDetailFor(annotation.id);
     const detail = document.createElement('div');
     detail.className = 'kng-pin-detail';
     detail.dataset.kngFor = annotation.id;
@@ -1456,21 +1467,9 @@
     detail.style.top = `${Math.min(top, window.innerHeight - 120)}px`;
     document.body.appendChild(detail);
 
-    setTimeout(() => {
-      document.addEventListener(
-        'click',
-        function closeOnOutside(e) {
-          if (
-            !detail.contains(e.target) &&
-            !e.target.closest(`.kng-pin[data-kng-pin-id="${annotation.id}"]`)
-          ) {
-            detail.remove();
-            document.removeEventListener('click', closeOnOutside, true);
-          }
-        },
-        true
-      );
-    }, 0);
+    document
+      .querySelectorAll(`.kng-pin[data-kng-pin-id="${annotation.id}"]`)
+      .forEach((el) => el.classList.add('kng-pin-open'));
   }
 
   function renderPageMarkers() {
@@ -1492,16 +1491,17 @@
       const el = resolveAnnotationElement(ann);
       if (!el || isKngNode(el)) return;
 
-      const pin = document.createElement('button');
-      pin.type = 'button';
+      const pin = document.createElement('div');
       pin.className = 'kng-pin';
+      pin.setAttribute('role', 'button');
+      pin.tabIndex = 0;
       pin.dataset.kngPinId = ann.id;
       pin.title = ann.title;
       pin.textContent = ann.title;
 
       pin.addEventListener('click', (e) => {
         stopKngEvent(e);
-        showPinDetail(ann, { type: 'element', el });
+        togglePinDetail(ann, { type: 'element', el });
       });
 
       layer.appendChild(pin);
