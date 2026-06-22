@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KNotaçõesG
 // @namespace    https://github.com/Caio-Angelis/knotacoesg
-// @version      1.2.0
+// @version      1.3.0
 // @description  Anotações globais em qualquer site
 // @author       Caio-Angelis
 // @match        *://*/*
@@ -514,7 +514,8 @@
         background: rgba(0,0,0,0.12) !important;
         cursor: crosshair !important;
         z-index: 2147483645 !important;
-        pointer-events: none !important;
+        pointer-events: auto !important;
+        touch-action: none !important;
       }
       .kng-click-cursor {
         position: fixed !important;
@@ -759,6 +760,17 @@
 
   // ─── CLICK MODE (posição livre na página) ─────────────────────────────────
 
+  const CLICK_BLOCK_EVENTS = [
+    'mousedown',
+    'mouseup',
+    'pointerdown',
+    'pointerup',
+    'dblclick',
+    'contextmenu',
+    'touchstart',
+    'touchend',
+  ];
+
   function updateClickCursor(clientX, clientY) {
     if (!ui.clickCursor) return;
     ui.clickCursor.style.left = `${clientX}px`;
@@ -772,22 +784,36 @@
     }
   }
 
+  function detachClickModeListeners() {
+    if (!ui.clickHandlers) return;
+    const { move, click, wheel, blockers, overlay } = ui.clickHandlers;
+    if (overlay) {
+      overlay.removeEventListener('mousemove', move);
+      overlay.removeEventListener('click', click);
+      if (wheel) overlay.removeEventListener('wheel', wheel);
+    }
+    if (blockers) {
+      CLICK_BLOCK_EVENTS.forEach((type) => {
+        document.removeEventListener(type, blockers, true);
+      });
+    }
+    ui.clickHandlers = null;
+  }
+
   function exitClickMode() {
     ui.clickModeActive = false;
     removeClickCursor();
+    detachClickModeListeners();
     if (ui.overlay) {
       ui.overlay.remove();
       ui.overlay = null;
-    }
-    if (ui.clickHandlers) {
-      document.removeEventListener('mousemove', ui.clickHandlers.move, true);
-      document.removeEventListener('click', ui.clickHandlers.click, true);
-      ui.clickHandlers = null;
     }
     if (ui.escHandler) {
       document.removeEventListener('keydown', ui.escHandler, true);
       ui.escHandler = null;
     }
+    const markersLayer = document.getElementById('kng-markers-layer');
+    if (markersLayer) markersLayer.hidden = false;
   }
 
   function handlePointClick(pageX, pageY) {
@@ -802,6 +828,7 @@
         markerId: '',
       },
     };
+    exitClickMode();
     openCreateModal();
   }
 
@@ -810,9 +837,13 @@
     closeCreateModal();
     ui.clickModeActive = true;
 
+    const markersLayer = document.getElementById('kng-markers-layer');
+    if (markersLayer) markersLayer.hidden = true;
+
     const overlay = document.createElement('div');
     overlay.id = 'kng-overlay';
     overlay.className = 'kng-overlay';
+    overlay.setAttribute('aria-label', 'Modo anotação — clique para marcar posição');
     document.body.appendChild(overlay);
     ui.overlay = overlay;
 
@@ -822,7 +853,7 @@
     document.body.appendChild(cursor);
     ui.clickCursor = cursor;
 
-    showToast('Clique em qualquer lugar da página para anotar. Esc para cancelar.');
+    showToast('Clique para marcar. A página está bloqueada. Scroll com a roda do mouse. Esc cancela.');
 
     const onMove = (e) => {
       if (!ui.clickModeActive) return;
@@ -831,11 +862,23 @@
 
     const onClick = (e) => {
       if (!ui.clickModeActive) return;
-      if (isKngNode(e.target)) return;
       stopKngEvent(e);
       const pageX = e.clientX + window.scrollX;
       const pageY = e.clientY + window.scrollY;
       handlePointClick(pageX, pageY);
+    };
+
+    const onWheel = (e) => {
+      if (!ui.clickModeActive) return;
+      window.scrollBy({ left: e.deltaX, top: e.deltaY, behavior: 'auto' });
+    };
+
+    const blockPageInteraction = (e) => {
+      if (!ui.clickModeActive) return;
+      if (isKngNode(e.target)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
     };
 
     const onEsc = (e) => {
@@ -845,10 +888,22 @@
       }
     };
 
-    ui.clickHandlers = { move: onMove, click: onClick };
+    overlay.addEventListener('mousemove', onMove);
+    overlay.addEventListener('click', onClick);
+    overlay.addEventListener('wheel', onWheel, { passive: true });
+
+    CLICK_BLOCK_EVENTS.forEach((type) => {
+      document.addEventListener(type, blockPageInteraction, true);
+    });
+
+    ui.clickHandlers = {
+      move: onMove,
+      click: onClick,
+      wheel: onWheel,
+      blockers: blockPageInteraction,
+      overlay,
+    };
     ui.escHandler = onEsc;
-    document.addEventListener('mousemove', onMove, true);
-    document.addEventListener('click', onClick, true);
     document.addEventListener('keydown', onEsc, true);
   }
 
