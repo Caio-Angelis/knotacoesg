@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name         KNotaçõesG
 // @namespace    https://github.com/Caio-Angelis/knotacoesg
-// @version      1.6.1
-// @run-at       document-idle
+// @version      1.7.0
+// @run-at       document-end
 // @description  Anotações globais em qualquer site
 // @author       Caio-Angelis
 // @match        *://*/*
 // @grant        GM_setValue
 // @grant        GM_getValue
+// @grant        GM_addStyle
 // @grant        GM_registerMenuCommand
 // @grant        GM_unregisterMenuCommand
 // @updateURL    https://raw.githubusercontent.com/Caio-Angelis/knotacoesg/main/knotacoes.user.js
@@ -32,8 +33,10 @@
   const STORAGE_KEYS = {
     ANNOTATIONS: 'kng_annotations',
     SITE_ENABLED: 'kng_site_enabled',
+    WELCOME_SHOWN: 'kng_welcome_shown',
   };
   const HASH_PREFIX = 'kng=';
+  const SCRIPT_VERSION = '1.7.0';
   const DEBUG = false;
   const KNG_MARKER_ATTR = 'data-kng-id';
 
@@ -347,12 +350,25 @@
     markerRenderTimer: null,
     domObserver: null,
     spaHooksRegistered: false,
+    shadowRoot: null,
+    stylesInjected: false,
   };
 
   let kngInitialized = false;
   let toggleMenuId = null;
   let urlWatchersRegistered = false;
   let historyWrapped = false;
+  let heartbeatTimer = null;
+
+  function isUserscriptEnv() {
+    return typeof GM_getValue === 'function' && typeof GM_setValue === 'function';
+  }
+
+  function warnMissingManager() {
+    console.error(
+      '[KNotaçõesG] Tampermonkey não detectado. Instale a extensão Tampermonkey e adicione o script pelo dashboard (Create Script → colar o arquivo .user.js).'
+    );
+  }
 
   // ─── UI HELPERS ───────────────────────────────────────────────────────────
 
@@ -361,7 +377,9 @@
 
   function isKngNode(el) {
     if (!el || el.nodeType !== Node.ELEMENT_NODE) return false;
-    if (el.id === 'kng-styles' || el.id === 'kng-fab' || el.id === 'kng-overlay' || el.id === 'kng-markers-layer') return true;
+    const host = document.getElementById('kng-shadow-host');
+    if (host && (el === host || host.shadowRoot?.contains(el))) return true;
+    if (el.id === 'kng-shadow-host') return true;
     if (el.closest && el.closest(KNG_UI_SELECTOR)) return true;
     return false;
   }
@@ -416,6 +434,43 @@
 
   function getMountRoot() {
     return document.body || document.documentElement;
+  }
+
+  function ensureUiShadow() {
+    if (ui.shadowRoot) return ui.shadowRoot;
+
+    let host = document.getElementById('kng-shadow-host');
+    if (!host) {
+      host = document.createElement('div');
+      host.id = 'kng-shadow-host';
+      host.setAttribute(
+        'style',
+        'all:initial;position:fixed;inset:0;z-index:2147483645;pointer-events:none;'
+      );
+      getMountRoot().appendChild(host);
+      ui.shadowRoot = host.attachShadow({ mode: 'open' });
+    } else {
+      ui.shadowRoot = host.shadowRoot || host.attachShadow({ mode: 'open' });
+    }
+
+    return ui.shadowRoot;
+  }
+
+  function appendUi(node) {
+    ensureUiShadow().appendChild(node);
+    return node;
+  }
+
+  function queryKng(id) {
+    const host = document.getElementById('kng-shadow-host');
+    return host?.shadowRoot?.getElementById(id) || document.getElementById(id);
+  }
+
+  function queryKngAll(selector) {
+    const host = document.getElementById('kng-shadow-host');
+    const inShadow = host?.shadowRoot ? Array.from(host.shadowRoot.querySelectorAll(selector)) : [];
+    const inDoc = Array.from(document.querySelectorAll(selector));
+    return [...inShadow, ...inDoc];
   }
 
   function clearNode(el) {
@@ -476,11 +531,11 @@
   }
 
   function showToast(message, durationMs = 3500) {
-    document.querySelectorAll('.kng-toast').forEach((t) => t.remove());
+    queryKngAll('.kng-toast').forEach((t) => t.remove());
     const toast = document.createElement('div');
     toast.className = 'kng-toast';
     toast.textContent = message;
-    getMountRoot().appendChild(toast);
+    appendUi(toast);
     setTimeout(() => toast.remove(), durationMs);
   }
 
@@ -541,11 +596,10 @@
   // ─── STYLES ───────────────────────────────────────────────────────────────
 
   function injectStyles() {
-    if (document.getElementById('kng-styles')) return;
+    if (ui.stylesInjected) return;
+    ui.stylesInjected = true;
 
-    const style = document.createElement('style');
-    style.id = 'kng-styles';
-    style.textContent = `
+    const css = `
       .kng-fab {
         position: fixed !important;
         right: 20px !important;
@@ -565,6 +619,7 @@
         justify-content: center !important;
         line-height: 1 !important;
         padding: 0 !important;
+        pointer-events: auto !important;
       }
       .kng-fab:hover { background: #16213e !important; }
       .kng-fab-menu {
@@ -579,6 +634,7 @@
         z-index: 2147483646 !important;
         overflow: hidden !important;
         font: 14px/1.4 system-ui, sans-serif !important;
+        pointer-events: auto !important;
       }
       .kng-fab-menu button {
         display: block !important;
@@ -634,6 +690,7 @@
         align-items: center !important;
         justify-content: center !important;
         padding: 16px !important;
+        pointer-events: auto !important;
       }
       .kng-modal, .kng-panel {
         background: #fff !important;
@@ -758,6 +815,7 @@
         font: 13px/1.4 system-ui, sans-serif !important;
         box-shadow: 0 4px 16px rgba(0,0,0,0.3) !important;
         max-width: 320px !important;
+        pointer-events: auto !important;
       }
       .kng-markers-layer {
         position: fixed !important;
@@ -818,7 +876,14 @@
       .kng-pin-detail p { margin: 0 0 6px !important; color: #444 !important; }
       .kng-pin-detail .kng-pin-meta { font-size: 11px !important; color: #666 !important; }
     `;
-    document.head.appendChild(style);
+
+    if (typeof GM_addStyle === 'function') {
+      GM_addStyle(css);
+    } else {
+      const style = document.createElement('style');
+      style.textContent = css;
+      ensureUiShadow().appendChild(style);
+    }
   }
 
   // ─── FAB ──────────────────────────────────────────────────────────────────
@@ -873,7 +938,7 @@
 
     ui.fab = fab;
     ui.fabMenu = menu;
-    getMountRoot().appendChild(menu);
+    appendUi(menu);
     return fab;
   }
 
@@ -931,7 +996,7 @@
       document.removeEventListener('keydown', ui.escHandler, true);
       ui.escHandler = null;
     }
-    const markersLayer = document.getElementById('kng-markers-layer');
+    const markersLayer = queryKng('kng-markers-layer');
     if (markersLayer) markersLayer.hidden = false;
   }
 
@@ -956,20 +1021,20 @@
     closeCreateModal();
     ui.clickModeActive = true;
 
-    const markersLayer = document.getElementById('kng-markers-layer');
+    const markersLayer = queryKng('kng-markers-layer');
     if (markersLayer) markersLayer.hidden = true;
 
     const overlay = document.createElement('div');
     overlay.id = 'kng-overlay';
     overlay.className = 'kng-overlay';
     overlay.setAttribute('aria-label', 'Modo anotação — clique para marcar posição');
-    getMountRoot().appendChild(overlay);
+    appendUi(overlay);
     ui.overlay = overlay;
 
     const cursor = document.createElement('div');
     cursor.className = 'kng-click-cursor';
     cursor.setAttribute('aria-hidden', 'true');
-    getMountRoot().appendChild(cursor);
+    appendUi(cursor);
     ui.clickCursor = cursor;
 
     showToast('Clique para marcar. A página está bloqueada. Scroll com a roda do mouse. Esc cancela.');
@@ -1031,7 +1096,8 @@
   function openCreateModal() {
     if (ui.createModal || !ui.pending) return;
 
-    const video = findNativeVideo();
+    try {
+      const video = findNativeVideo();
     const backdrop = document.createElement('div');
     backdrop.className = 'kng-modal-backdrop';
 
@@ -1126,10 +1192,14 @@
     });
     modal.addEventListener('click', stopKngEvent);
     backdrop.appendChild(modal);
-    getMountRoot().appendChild(backdrop);
+    appendUi(backdrop);
     ui.createModal = backdrop;
     trapFocus(modal);
     titleInput.focus();
+    } catch (err) {
+      console.error(`[KNotaçõesG v${SCRIPT_VERSION}] openCreateModal:`, err);
+      showToast(`Erro ao abrir formulário. Atualize o script para v${SCRIPT_VERSION}.`);
+    }
   }
 
   // ─── PANEL ────────────────────────────────────────────────────────────────
@@ -1320,7 +1390,7 @@
     });
 
     backdrop.appendChild(panel);
-    getMountRoot().appendChild(backdrop);
+    appendUi(backdrop);
     ui.panel = backdrop;
     trapFocus(panel);
     refresh();
@@ -1356,8 +1426,8 @@
       clearTimeout(ui.markerRenderTimer);
       ui.markerRenderTimer = null;
     }
-    document.querySelectorAll('.kng-pin-detail').forEach((el) => el.remove());
-    const layer = document.getElementById('kng-markers-layer');
+    queryKngAll('.kng-pin-detail').forEach((el) => el.remove());
+    const layer = queryKng('kng-markers-layer');
     if (layer) layer.remove();
     if (ui.markerScrollHandler) {
       window.removeEventListener('scroll', ui.markerScrollHandler, true);
@@ -1493,12 +1563,12 @@
   }
 
   function ensureMarkersLayer() {
-    let layer = document.getElementById('kng-markers-layer');
+    let layer = queryKng('kng-markers-layer');
     if (!layer) {
       layer = document.createElement('div');
       layer.id = 'kng-markers-layer';
       layer.className = 'kng-markers-layer';
-      getMountRoot().appendChild(layer);
+      appendUi(layer);
     }
     return layer;
   }
@@ -1526,30 +1596,30 @@
     });
   }
 
-  function isPinDetailOpen(annotationId) {
-    return !!document.querySelector(`.kng-pin-detail[data-kng-for="${annotationId}"]`);
-  }
-
-  function updatePinDetailPosition(annotationId, anchor) {
-    const detail = document.querySelector(`.kng-pin-detail[data-kng-for="${annotationId}"]`);
-    if (!detail || !anchor) return;
-    const pos = normalizedToViewport(anchor.x, anchor.y);
-    detail.style.left = `${Math.min(pos.left, window.innerWidth - 300)}px`;
-    detail.style.top = `${Math.min(pos.top + 16, window.innerHeight - 120)}px`;
-  }
-
   function closePinDetail() {
-    document.querySelectorAll('.kng-pin-detail').forEach((el) => el.remove());
-    document.querySelectorAll('.kng-pin.kng-pin-open').forEach((el) => el.classList.remove('kng-pin-open'));
+    queryKngAll('.kng-pin-detail').forEach((el) => el.remove());
+    queryKngAll('.kng-pin.kng-pin-open').forEach((el) => el.classList.remove('kng-pin-open'));
   }
 
   function closePinDetailFor(annotationId) {
-    document
-      .querySelectorAll(`.kng-pin-detail[data-kng-for="${annotationId}"]`)
-      .forEach((el) => el.remove());
-    document
-      .querySelectorAll(`.kng-pin[data-kng-pin-id="${annotationId}"]`)
-      .forEach((el) => el.classList.remove('kng-pin-open'));
+    queryKngAll(`.kng-pin-detail[data-kng-for="${annotationId}"]`).forEach((el) => el.remove());
+    queryKngAll(`.kng-pin[data-kng-pin-id="${annotationId}"]`).forEach((el) =>
+      el.classList.remove('kng-pin-open')
+    );
+  }
+
+  function isPinDetailOpen(annotationId) {
+    return queryKngAll(`.kng-pin-detail[data-kng-for="${annotationId}"]`).length > 0;
+  }
+
+  function updatePinDetailPosition(annotationId, anchor) {
+    const details = queryKngAll(`.kng-pin-detail[data-kng-for="${annotationId}"]`);
+    if (!details.length || !anchor) return;
+    const pos = normalizedToViewport(anchor.x, anchor.y);
+    details.forEach((detail) => {
+      detail.style.left = `${Math.min(pos.left, window.innerWidth - 300)}px`;
+      detail.style.top = `${Math.min(pos.top + 16, window.innerHeight - 120)}px`;
+    });
   }
 
   function togglePinDetail(annotation, anchorInfo) {
@@ -1598,11 +1668,11 @@
     }
     detail.style.left = `${Math.min(left, window.innerWidth - 300)}px`;
     detail.style.top = `${Math.min(top, window.innerHeight - 120)}px`;
-    getMountRoot().appendChild(detail);
+    appendUi(detail);
 
-    document
-      .querySelectorAll(`.kng-pin[data-kng-pin-id="${annotation.id}"]`)
-      .forEach((el) => el.classList.add('kng-pin-open'));
+    queryKngAll(`.kng-pin[data-kng-pin-id="${annotation.id}"]`).forEach((el) =>
+      el.classList.add('kng-pin-open')
+    );
   }
 
   function renderPageMarkers() {
@@ -1649,7 +1719,7 @@
     updateMarkerPositions();
     ensureMarkerScrollHandler();
     if (ui.clickModeActive) {
-      const markersLayer = document.getElementById('kng-markers-layer');
+      const markersLayer = queryKng('kng-markers-layer');
       if (markersLayer) markersLayer.hidden = true;
     }
   }
@@ -1715,7 +1785,7 @@
     const pos = normalizedToViewport(anchor.x, anchor.y);
     pulse.style.left = `${pos.left}px`;
     pulse.style.top = `${pos.top}px`;
-    getMountRoot().appendChild(pulse);
+    appendUi(pulse);
     pulse.addEventListener('animationend', () => pulse.remove(), { once: true });
     setTimeout(() => pulse.remove(), 3100);
   }
@@ -1820,23 +1890,51 @@
   }
 
   function watchForDOMChanges() {
-    const root = document.body;
-    if (!root || ui.domObserver) return;
+    if (ui.domObserver) return;
 
-    ui.domObserver = new MutationObserver(() => {
+    const tryObserve = () => {
+      const root = document.body || document.documentElement;
+      if (!root) return false;
+
+      ui.domObserver = new MutationObserver(() => {
+        if (!isSiteEnabled()) return;
+        if (!queryKng('kng-fab')) {
+          setupUI();
+        }
+      });
+
+      ui.domObserver.observe(root, { childList: true, subtree: false });
+      return true;
+    };
+
+    if (!tryObserve()) {
+      setTimeout(watchForDOMChanges, 200);
+    }
+  }
+
+  function startHeartbeat() {
+    if (heartbeatTimer) return;
+    heartbeatTimer = setInterval(() => {
       if (!isSiteEnabled()) return;
-      if (!document.getElementById('kng-fab')) {
-        setupUI();
+      if (!queryKng('kng-fab')) {
+        ensureBootstrap();
       }
-    });
+    }, 3000);
+  }
 
-    ui.domObserver.observe(root, { childList: true });
+  function showWelcomeOnce() {
+    if (!isUserscriptEnv()) return;
+    if (GM_getValue(STORAGE_KEYS.WELCOME_SHOWN, false)) return;
+    GM_setValue(STORAGE_KEYS.WELCOME_SHOWN, true);
+    setTimeout(() => {
+      showToast('KNotaçõesG ativo! Clique no 📝 no canto inferior direito.');
+    }, 800);
   }
 
   function ensureBootstrap(retry = 0) {
     if (!isSiteEnabled()) return;
     if (!getMountRoot()) {
-      if (retry < 60) setTimeout(() => ensureBootstrap(retry + 1), 100);
+      if (retry < 120) setTimeout(() => ensureBootstrap(retry + 1), 100);
       return;
     }
 
@@ -1845,8 +1943,14 @@
     registerUrlWatchers();
     registerSPAHooks();
     watchForDOMChanges();
+    startHeartbeat();
     scheduleRenderPageMarkers();
     retryWithBackoff(tryHighlightFromHash);
+
+    if (queryKng('kng-fab')) {
+      showWelcomeOnce();
+    }
+
     log('ensureBootstrap');
   }
 
@@ -1870,6 +1974,9 @@
       ui.fabMenu.remove();
       ui.fabMenu = null;
     }
+    const shadowHost = document.getElementById('kng-shadow-host');
+    if (shadowHost) shadowHost.remove();
+    ui.shadowRoot = null;
     if (ui.outsideClickHandler) {
       document.removeEventListener('click', ui.outsideClickHandler);
       ui.outsideClickHandler = null;
@@ -1877,9 +1984,10 @@
   }
 
   function setupUI() {
-    if (document.getElementById('kng-fab')) return;
-    const fab = createFAB();
-    getMountRoot().appendChild(fab);
+    if (queryKng('kng-fab')) return;
+    injectStyles();
+    ensureUiShadow();
+    appendUi(createFAB());
   }
 
   function updateToggleMenuCommand() {
@@ -1912,9 +2020,19 @@
     if (kngInitialized) return;
     kngInitialized = true;
 
+    if (!isUserscriptEnv()) {
+      warnMissingManager();
+      return;
+    }
+
+    console.info(`[KNotaçõesG] v${SCRIPT_VERSION} carregado`);
+
     registerToggleCommand();
 
-    if (!isSiteEnabled()) return;
+    if (!isSiteEnabled()) {
+      showToast('KNotaçõesG: anotações desativadas neste site. Menu Tampermonkey → Ativar.');
+      return;
+    }
 
     ensureBootstrap();
     log('KNotaçõesG inicializado');
@@ -1927,6 +2045,12 @@
   }
 
   window.addEventListener('load', () => {
-    if (isSiteEnabled()) ensureBootstrap();
+    if (isUserscriptEnv() && isSiteEnabled()) ensureBootstrap();
+  });
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && isUserscriptEnv() && isSiteEnabled()) {
+      ensureBootstrap();
+    }
   });
 })();
