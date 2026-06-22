@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KNotaçõesG
 // @namespace    https://github.com/Caio-Angelis/knotacoesg
-// @version      1.0.0
+// @version      1.1.0
 // @description  Anotações globais em qualquer site
 // @author       Caio-Angelis
 // @match        *://*/*
@@ -321,6 +321,9 @@
     escHandler: null,
     clickHandlers: null,
     outsideClickHandler: null,
+    markerEntries: null,
+    markerScrollHandler: null,
+    markerRenderTimer: null,
   };
 
   let kngInitialized = false;
@@ -332,7 +335,7 @@
 
   function isKngNode(el) {
     if (!el || el.nodeType !== Node.ELEMENT_NODE) return false;
-    if (el.id === 'kng-styles' || el.id === 'kng-fab' || el.id === 'kng-overlay') return true;
+    if (el.id === 'kng-styles' || el.id === 'kng-fab' || el.id === 'kng-overlay' || el.id === 'kng-markers-layer') return true;
     if (el.classList && Array.from(el.classList).some((c) => c.startsWith('kng-'))) return true;
     return el.closest ? !!el.closest('[class*="kng-"], #kng-fab, #kng-overlay') : false;
   }
@@ -597,6 +600,52 @@
         box-shadow: 0 4px 16px rgba(0,0,0,0.3) !important;
         max-width: 320px !important;
       }
+      .kng-markers-layer {
+        position: fixed !important;
+        inset: 0 !important;
+        pointer-events: none !important;
+        z-index: 2147483645 !important;
+        overflow: hidden !important;
+      }
+      .kng-pin {
+        position: fixed !important;
+        pointer-events: auto !important;
+        max-width: 200px !important;
+        padding: 4px 10px !important;
+        background: #e6a817 !important;
+        color: #1a1a2e !important;
+        border: 2px solid #1a1a2e !important;
+        border-radius: 999px !important;
+        font: 12px/1.3 system-ui, sans-serif !important;
+        font-weight: 600 !important;
+        cursor: pointer !important;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.25) !important;
+        white-space: nowrap !important;
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
+        transform: translate(-50%, -50%) !important;
+      }
+      .kng-pin:hover { background: #f0bc2a !important; }
+      .kng-pin-detail {
+        position: fixed !important;
+        width: min(280px, calc(100vw - 32px)) !important;
+        background: #fff !important;
+        color: #111 !important;
+        border: 2px solid #e6a817 !important;
+        border-radius: 10px !important;
+        padding: 12px 14px !important;
+        z-index: 2147483647 !important;
+        font: 13px/1.45 system-ui, sans-serif !important;
+        box-shadow: 0 8px 24px rgba(0,0,0,0.25) !important;
+        pointer-events: auto !important;
+      }
+      .kng-pin-detail h3 {
+        margin: 0 0 6px !important;
+        font-size: 14px !important;
+        font-weight: 600 !important;
+      }
+      .kng-pin-detail p { margin: 0 0 6px !important; color: #444 !important; }
+      .kng-pin-detail .kng-pin-meta { font-size: 11px !important; color: #666 !important; }
     `;
     document.head.appendChild(style);
   }
@@ -838,6 +887,7 @@
       });
       closeCreateModal();
       exitClickMode();
+      renderPageMarkers();
       showToast('Anotação salva');
     });
 
@@ -1032,6 +1082,141 @@
     refresh();
   }
 
+  // ─── PAGE MARKERS (anotações visíveis na tela) ────────────────────────────
+
+  function currentPageUrl() {
+    return location.href.split('#')[0];
+  }
+
+  function getAnnotationsForCurrentPage() {
+    const page = currentPageUrl();
+    return loadAnnotations().filter((a) => String(a.url || '').split('#')[0] === page);
+  }
+
+  function clearPageMarkers() {
+    if (ui.markerRenderTimer) {
+      clearTimeout(ui.markerRenderTimer);
+      ui.markerRenderTimer = null;
+    }
+    document.querySelectorAll('.kng-pin-detail').forEach((el) => el.remove());
+    const layer = document.getElementById('kng-markers-layer');
+    if (layer) layer.remove();
+    if (ui.markerScrollHandler) {
+      window.removeEventListener('scroll', ui.markerScrollHandler, true);
+      window.removeEventListener('resize', ui.markerScrollHandler);
+      ui.markerScrollHandler = null;
+    }
+    ui.markerEntries = null;
+  }
+
+  function ensureMarkersLayer() {
+    let layer = document.getElementById('kng-markers-layer');
+    if (!layer) {
+      layer = document.createElement('div');
+      layer.id = 'kng-markers-layer';
+      layer.className = 'kng-markers-layer';
+      document.body.appendChild(layer);
+    }
+    return layer;
+  }
+
+  function updateMarkerPositions() {
+    if (!ui.markerEntries) return;
+    ui.markerEntries.forEach(({ pin, el }) => {
+      if (!el.isConnected) {
+        pin.hidden = true;
+        return;
+      }
+      pin.hidden = false;
+      const rect = el.getBoundingClientRect();
+      pin.style.left = `${rect.right - 4}px`;
+      pin.style.top = `${rect.top - 4}px`;
+    });
+  }
+
+  function closePinDetail() {
+    document.querySelectorAll('.kng-pin-detail').forEach((el) => el.remove());
+  }
+
+  function showPinDetail(annotation, anchorEl) {
+    closePinDetail();
+    const detail = document.createElement('div');
+    detail.className = 'kng-pin-detail';
+
+    const parts = [];
+    if (annotation.description) parts.push(`<p>${escapeHtml(annotation.description)}</p>`);
+    const meta = [
+      annotation.tag || null,
+      annotation.videoTimestamp != null ? formatTimestamp(annotation.videoTimestamp) : null,
+    ]
+      .filter(Boolean)
+      .join(' · ');
+    if (meta) parts.push(`<div class="kng-pin-meta">${escapeHtml(meta)}</div>`);
+
+    detail.innerHTML = `<h3>${escapeHtml(annotation.title)}</h3>${parts.join('')}`;
+    detail.addEventListener('click', stopKngEvent);
+
+    const rect = anchorEl.getBoundingClientRect();
+    detail.style.left = `${Math.min(rect.left, window.innerWidth - 300)}px`;
+    detail.style.top = `${Math.min(rect.bottom + 8, window.innerHeight - 120)}px`;
+    document.body.appendChild(detail);
+
+    setTimeout(() => {
+      document.addEventListener(
+        'click',
+        function closeOnOutside(e) {
+          if (!detail.contains(e.target) && !e.target.classList.contains('kng-pin')) {
+            detail.remove();
+            document.removeEventListener('click', closeOnOutside, true);
+          }
+        },
+        true
+      );
+    }, 0);
+  }
+
+  function renderPageMarkers() {
+    clearPageMarkers();
+    const annotations = getAnnotationsForCurrentPage();
+    if (annotations.length === 0) return;
+
+    const layer = ensureMarkersLayer();
+    ui.markerEntries = [];
+
+    annotations.forEach((ann) => {
+      const el = resolveAnnotationElement(ann);
+      if (!el || isKngNode(el)) return;
+
+      const pin = document.createElement('button');
+      pin.type = 'button';
+      pin.className = 'kng-pin';
+      pin.title = ann.title;
+      pin.textContent = ann.title;
+      pin.addEventListener('click', (e) => {
+        stopKngEvent(e);
+        showPinDetail(ann, el);
+      });
+
+      layer.appendChild(pin);
+      ui.markerEntries.push({ pin, el });
+    });
+
+    if (ui.markerEntries.length === 0) {
+      clearPageMarkers();
+      return;
+    }
+
+    updateMarkerPositions();
+    ui.markerScrollHandler = () => updateMarkerPositions();
+    window.addEventListener('scroll', ui.markerScrollHandler, true);
+    window.addEventListener('resize', ui.markerScrollHandler);
+  }
+
+  function scheduleRenderPageMarkers() {
+    if (ui.markerRenderTimer) clearTimeout(ui.markerRenderTimer);
+    ui.markerRenderTimer = setTimeout(renderPageMarkers, 150);
+  }
+
   // ─── HIGHLIGHT ────────────────────────────────────────────────────────────
 
   function parseHashId() {
@@ -1124,8 +1309,13 @@
     if (urlWatchersRegistered) return;
     urlWatchersRegistered = true;
 
-    window.addEventListener('hashchange', () => retryWithBackoff(tryHighlightFromHash));
-    window.addEventListener('popstate', () => retryWithBackoff(tryHighlightFromHash));
+    const onUrlChange = () => {
+      scheduleRenderPageMarkers();
+      retryWithBackoff(tryHighlightFromHash);
+    };
+
+    window.addEventListener('hashchange', onUrlChange);
+    window.addEventListener('popstate', onUrlChange);
 
     if (!historyWrapped) {
       historyWrapped = true;
@@ -1134,13 +1324,13 @@
 
       history.pushState = function (...args) {
         const ret = origPush(...args);
-        retryWithBackoff(tryHighlightFromHash);
+        onUrlChange();
         return ret;
       };
 
       history.replaceState = function (...args) {
         const ret = origReplace(...args);
-        retryWithBackoff(tryHighlightFromHash);
+        onUrlChange();
         return ret;
       };
     }
@@ -1153,6 +1343,7 @@
     closeCreateModal();
     closePanel();
     closeFabMenu();
+    clearPageMarkers();
     if (ui.fab) {
       ui.fab.remove();
       ui.fab = null;
@@ -1188,6 +1379,7 @@
       if (enabling) {
         setupUI();
         registerUrlWatchers();
+        scheduleRenderPageMarkers();
         retryWithBackoff(tryHighlightFromHash);
       } else {
         teardownUI();
@@ -1211,6 +1403,7 @@
 
     setupUI();
     registerUrlWatchers();
+    scheduleRenderPageMarkers();
     retryWithBackoff(tryHighlightFromHash);
     log('KNotaçõesG inicializado');
   }
