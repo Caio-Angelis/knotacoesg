@@ -1,7 +1,8 @@
 // ==UserScript==
 // @name         KNotaçõesG
 // @namespace    https://github.com/Caio-Angelis/knotacoesg
-// @version      1.5.0
+// @version      1.6.0
+// @run-at       document-idle
 // @description  Anotações globais em qualquer site
 // @author       Caio-Angelis
 // @match        *://*/*
@@ -83,6 +84,7 @@
       description: payload.description || '',
       tag: payload.tag || null,
       url: normalizePageUrl(location.href),
+      pageKey: pageIdentity(location.href),
       hostname: location.hostname,
       createdAt: Date.now(),
       videoTimestamp: payload.videoTimestamp ?? null,
@@ -288,6 +290,9 @@
   }
 
   function findNativeVideo() {
+    const ytVideo = document.querySelector('video.html5-main-video');
+    if (ytVideo && isElementVisible(ytVideo)) return ytVideo;
+
     const videos = getNativeVideos();
     if (videos.length === 0) return null;
 
@@ -340,6 +345,8 @@
     markerEntries: null,
     markerScrollHandler: null,
     markerRenderTimer: null,
+    domObserver: null,
+    spaHooksRegistered: false,
   };
 
   let kngInitialized = false;
@@ -376,6 +383,39 @@
 
   function normalizePageUrl(url = location.href) {
     return String(url || '').split('#')[0];
+  }
+
+  function pageIdentity(url = location.href) {
+    const base = normalizePageUrl(url);
+    try {
+      const u = new URL(base);
+      const host = u.hostname.replace(/^www\./, '');
+
+      if (host === 'youtube.com' || host.endsWith('.youtube.com')) {
+        const v = u.searchParams.get('v');
+        if (v) return `youtube:watch:${v}`;
+        const shorts = u.pathname.match(/^\/shorts\/([^/?#]+)/);
+        if (shorts) return `youtube:shorts:${shorts[1]}`;
+        const embed = u.pathname.match(/^\/embed\/([^/?#]+)/);
+        if (embed) return `youtube:embed:${embed[1]}`;
+      }
+
+      if (host === 'youtu.be') {
+        const id = u.pathname.replace(/^\//, '').split('/')[0];
+        if (id) return `youtube:watch:${id}`;
+      }
+    } catch (_) {}
+    return base;
+  }
+
+  function matchesCurrentPage(annotation) {
+    const currentKey = pageIdentity();
+    const annKey = annotation.pageKey || pageIdentity(annotation.url);
+    return annKey === currentKey;
+  }
+
+  function getMountRoot() {
+    return document.body || document.documentElement;
   }
 
   function documentSize() {
@@ -416,7 +456,7 @@
     const toast = document.createElement('div');
     toast.className = 'kng-toast';
     toast.textContent = message;
-    document.body.appendChild(toast);
+    getMountRoot().appendChild(toast);
     setTimeout(() => toast.remove(), durationMs);
   }
 
@@ -646,11 +686,34 @@
         border-radius: 8px !important;
         padding: 12px !important;
         margin-bottom: 8px !important;
-        cursor: pointer !important;
+        cursor: default !important;
+        display: flex !important;
+        align-items: stretch !important;
+        gap: 10px !important;
       }
       .kng-list-item:hover { background: #f8f8fc !important; border-color: #c8c8d8 !important; }
+      .kng-list-item-main {
+        flex: 1 !important;
+        min-width: 0 !important;
+        cursor: pointer !important;
+      }
       .kng-list-item strong { display: block !important; margin-bottom: 4px !important; }
-      .kng-list-meta { font-size: 12px !important; color: #555 !important; }
+      .kng-list-date {
+        display: block !important;
+        font-size: 12px !important;
+        color: #222 !important;
+        font-weight: 600 !important;
+        margin-bottom: 4px !important;
+      }
+      .kng-list-meta { font-size: 12px !important; color: #555 !important; display: block !important; }
+      .kng-list-delete { flex-shrink: 0 !important; align-self: center !important; }
+      .kng-btn-danger {
+        background: #c62828 !important;
+        color: #fff !important;
+        font-size: 12px !important;
+        padding: 6px 10px !important;
+      }
+      .kng-btn-danger:hover { background: #b71c1c !important; }
       .kng-empty { color: #666 !important; text-align: center !important; padding: 24px !important; }
       .kng-pulse {
         animation: kng-pulse 1s ease-in-out 3 !important;
@@ -786,7 +849,7 @@
 
     ui.fab = fab;
     ui.fabMenu = menu;
-    document.body.appendChild(menu);
+    getMountRoot().appendChild(menu);
     return fab;
   }
 
@@ -876,13 +939,13 @@
     overlay.id = 'kng-overlay';
     overlay.className = 'kng-overlay';
     overlay.setAttribute('aria-label', 'Modo anotação — clique para marcar posição');
-    document.body.appendChild(overlay);
+    getMountRoot().appendChild(overlay);
     ui.overlay = overlay;
 
     const cursor = document.createElement('div');
     cursor.className = 'kng-click-cursor';
     cursor.setAttribute('aria-hidden', 'true');
-    document.body.appendChild(cursor);
+    getMountRoot().appendChild(cursor);
     ui.clickCursor = cursor;
 
     showToast('Clique para marcar. A página está bloqueada. Scroll com a roda do mouse. Esc cancela.');
@@ -1039,7 +1102,7 @@
     });
     modal.addEventListener('click', stopKngEvent);
     backdrop.appendChild(modal);
-    document.body.appendChild(backdrop);
+    getMountRoot().appendChild(backdrop);
     ui.createModal = backdrop;
     trapFocus(modal);
     titleInput.focus();
@@ -1064,7 +1127,7 @@
     return list;
   }
 
-  function renderPanelList(container, filters) {
+  function renderPanelList(container, filters, onChange) {
     container.innerHTML = '';
     const list = getFilteredAnnotations(filters);
 
@@ -1082,19 +1145,41 @@
     list.forEach((ann) => {
       const li = document.createElement('li');
       li.className = 'kng-list-item';
+
+      const main = document.createElement('div');
+      main.className = 'kng-list-item-main';
+
       const meta = [
         ann.hostname,
         ann.tag || 'Sem tag',
-        formatDisplayDate(ann.createdAt),
-        ann.videoTimestamp != null ? formatTimestamp(ann.videoTimestamp) : null,
+        ann.videoTimestamp != null ? `Vídeo ${formatTimestamp(ann.videoTimestamp)}` : null,
       ]
         .filter(Boolean)
         .join(' · ');
-      li.innerHTML = `<strong>${escapeHtml(ann.title)}</strong><span class="kng-list-meta">${escapeHtml(meta)}</span>`;
-      li.addEventListener('click', (e) => {
+
+      main.innerHTML = `<strong>${escapeHtml(ann.title)}</strong><span class="kng-list-date">${escapeHtml(formatDisplayDate(ann.createdAt))}</span><span class="kng-list-meta">${escapeHtml(meta)}</span>`;
+      main.addEventListener('click', (e) => {
         stopKngEvent(e);
         navigateToAnnotation(ann);
       });
+
+      const btnDelete = document.createElement('button');
+      btnDelete.type = 'button';
+      btnDelete.className = 'kng-btn kng-btn-danger kng-list-delete';
+      btnDelete.textContent = 'Excluir';
+      btnDelete.title = 'Excluir anotação';
+      btnDelete.addEventListener('click', (e) => {
+        stopKngEvent(e);
+        if (!confirm(`Excluir a anotação "${ann.title}"?`)) return;
+        deleteAnnotation(ann.id);
+        closePinDetailFor(ann.id);
+        removeMarkerForAnnotation(ann.id);
+        if (onChange) onChange();
+        showToast('Anotação excluída');
+      });
+
+      li.appendChild(main);
+      li.appendChild(btnDelete);
       ul.appendChild(li);
     });
 
@@ -1175,7 +1260,7 @@
       filters.site = siteSelect.value;
       filters.tag = tagSelect.value;
       filters.videoOnly = videoCheck.checked;
-      renderPanelList(listContainer, filters);
+      renderPanelList(listContainer, filters, refresh);
     };
 
     siteSelect.addEventListener('change', refresh);
@@ -1208,7 +1293,7 @@
     });
 
     backdrop.appendChild(panel);
-    document.body.appendChild(backdrop);
+    getMountRoot().appendChild(backdrop);
     ui.panel = backdrop;
     trapFocus(panel);
     refresh();
@@ -1221,8 +1306,22 @@
   }
 
   function getAnnotationsForCurrentPage() {
-    const page = currentPageUrl();
-    return loadAnnotations().filter((a) => normalizePageUrl(a.url) === page);
+    return loadAnnotations().filter(matchesCurrentPage);
+  }
+
+  function removeMarkerForAnnotation(annotationId) {
+    if (!ui.markerEntries) {
+      scheduleRenderPageMarkers();
+      return;
+    }
+    const idx = ui.markerEntries.findIndex((e) => e.annotationId === annotationId);
+    if (idx === -1) {
+      scheduleRenderPageMarkers();
+      return;
+    }
+    ui.markerEntries[idx].pin.remove();
+    ui.markerEntries.splice(idx, 1);
+    if (ui.markerEntries.length === 0) clearPageMarkers();
   }
 
   function clearPageMarkers() {
@@ -1344,7 +1443,7 @@
       scheduleRenderPageMarkers();
       return;
     }
-    if (normalizePageUrl(ann.url) !== currentPageUrl()) return;
+    if (!matchesCurrentPage(ann)) return;
 
     const layer = ensureMarkersLayer();
     if (!ui.markerEntries) ui.markerEntries = [];
@@ -1372,7 +1471,7 @@
       layer = document.createElement('div');
       layer.id = 'kng-markers-layer';
       layer.className = 'kng-markers-layer';
-      document.body.appendChild(layer);
+      getMountRoot().appendChild(layer);
     }
     return layer;
   }
@@ -1465,7 +1564,7 @@
     }
     detail.style.left = `${Math.min(left, window.innerWidth - 300)}px`;
     detail.style.top = `${Math.min(top, window.innerHeight - 120)}px`;
-    document.body.appendChild(detail);
+    getMountRoot().appendChild(detail);
 
     document
       .querySelectorAll(`.kng-pin[data-kng-pin-id="${annotation.id}"]`)
@@ -1582,7 +1681,7 @@
     const pos = normalizedToViewport(anchor.x, anchor.y);
     pulse.style.left = `${pos.left}px`;
     pulse.style.top = `${pos.top}px`;
-    document.body.appendChild(pulse);
+    getMountRoot().appendChild(pulse);
     pulse.addEventListener('animationend', () => pulse.remove(), { once: true });
     setTimeout(() => pulse.remove(), 3100);
   }
@@ -1651,8 +1750,7 @@
     urlWatchersRegistered = true;
 
     const onUrlChange = () => {
-      scheduleRenderPageMarkers();
-      retryWithBackoff(tryHighlightFromHash);
+      ensureBootstrap();
     };
 
     window.addEventListener('hashchange', onUrlChange);
@@ -1677,6 +1775,47 @@
     }
   }
 
+  function registerSPAHooks() {
+    if (ui.spaHooksRegistered) return;
+    ui.spaHooksRegistered = true;
+
+    const onSpaNav = () => ensureBootstrap();
+    document.addEventListener('yt-navigate-finish', onSpaNav);
+    document.addEventListener('yt-page-data-updated', onSpaNav);
+    window.addEventListener('load', onSpaNav);
+  }
+
+  function watchForDOMChanges() {
+    const root = document.body;
+    if (!root || ui.domObserver) return;
+
+    ui.domObserver = new MutationObserver(() => {
+      if (!isSiteEnabled()) return;
+      if (!document.getElementById('kng-fab')) {
+        setupUI();
+      }
+    });
+
+    ui.domObserver.observe(root, { childList: true });
+  }
+
+  function ensureBootstrap(retry = 0) {
+    if (!isSiteEnabled()) return;
+    if (!getMountRoot()) {
+      if (retry < 60) setTimeout(() => ensureBootstrap(retry + 1), 100);
+      return;
+    }
+
+    injectStyles();
+    setupUI();
+    registerUrlWatchers();
+    registerSPAHooks();
+    watchForDOMChanges();
+    scheduleRenderPageMarkers();
+    retryWithBackoff(tryHighlightFromHash);
+    log('ensureBootstrap');
+  }
+
   // ─── TOGGLE / TEARDOWN ────────────────────────────────────────────────────
 
   function teardownUI() {
@@ -1685,6 +1824,10 @@
     closePanel();
     closeFabMenu();
     clearPageMarkers();
+    if (ui.domObserver) {
+      ui.domObserver.disconnect();
+      ui.domObserver = null;
+    }
     if (ui.fab) {
       ui.fab.remove();
       ui.fab = null;
@@ -1701,8 +1844,8 @@
 
   function setupUI() {
     if (document.getElementById('kng-fab')) return;
-    injectStyles();
-    document.body.appendChild(createFAB());
+    const fab = createFAB();
+    getMountRoot().appendChild(fab);
   }
 
   function updateToggleMenuCommand() {
@@ -1718,10 +1861,7 @@
       setSiteEnabled(location.hostname, enabling);
       updateToggleMenuCommand();
       if (enabling) {
-        setupUI();
-        registerUrlWatchers();
-        scheduleRenderPageMarkers();
-        retryWithBackoff(tryHighlightFromHash);
+        ensureBootstrap();
       } else {
         teardownUI();
       }
@@ -1742,10 +1882,7 @@
 
     if (!isSiteEnabled()) return;
 
-    setupUI();
-    registerUrlWatchers();
-    scheduleRenderPageMarkers();
-    retryWithBackoff(tryHighlightFromHash);
+    ensureBootstrap();
     log('KNotaçõesG inicializado');
   }
 
@@ -1754,4 +1891,8 @@
   } else {
     init();
   }
+
+  window.addEventListener('load', () => {
+    if (isSiteEnabled()) ensureBootstrap();
+  });
 })();
