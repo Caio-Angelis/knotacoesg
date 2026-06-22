@@ -13,6 +13,7 @@
 - Anotar qualquer página web clicando em elementos
 - Persistir anotações **globalmente** (entre sites) via `GM_setValue`
 - Reencontrar elementos após reload via **CSS selector** robusto
+- **Pins dourados na tela** sobre cada elemento anotado (página atual)
 - Painel filtrável com navegação e destaque visual (`#kng={uuid}`)
 - Seek de vídeo nativo same-origin ao navegar para anotação
 - Toggle por site via menu Tampermonkey (desativa UI, mantém dados)
@@ -168,7 +169,7 @@ Menu TM → Ativar → setupUI() + watchers + highlight
 @namespace    https://github.com/Caio-Angelis/knotacoesg
 @updateURL    https://raw.githubusercontent.com/Caio-Angelis/knotacoesg/main/knotacoes.user.js
 @downloadURL  https://raw.githubusercontent.com/Caio-Angelis/knotacoesg/main/knotacoes.user.js
-@version      1.0.0
+@version      1.1.0
 ```
 
 Instalação 1-clique no Tampermonkey: colar a URL `@downloadURL` ou importar do GitHub.
