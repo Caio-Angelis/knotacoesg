@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KNotaçõesG
 // @namespace    https://github.com/Caio-Angelis/knotacoesg
-// @version      1.6.0
+// @version      1.6.1
 // @run-at       document-idle
 // @description  Anotações globais em qualquer site
 // @author       Caio-Angelis
@@ -416,6 +416,30 @@
 
   function getMountRoot() {
     return document.body || document.documentElement;
+  }
+
+  function clearNode(el) {
+    while (el.firstChild) el.removeChild(el.firstChild);
+  }
+
+  function createLabel(forId, text) {
+    const label = document.createElement('label');
+    label.htmlFor = forId;
+    label.textContent = text;
+    return label;
+  }
+
+  function createOption(value, text) {
+    const opt = document.createElement('option');
+    opt.value = value;
+    opt.textContent = text;
+    return opt;
+  }
+
+  function createHeading(tag, text) {
+    const el = document.createElement(tag);
+    el.textContent = text;
+    return el;
   }
 
   function documentSize() {
@@ -1013,7 +1037,7 @@
 
     const modal = document.createElement('div');
     modal.className = 'kng-modal';
-    modal.innerHTML = '<h2>Nova anotação</h2>';
+    modal.appendChild(createHeading('h2', 'Nova anotação'));
 
     if (video) {
       const preview = document.createElement('div');
@@ -1024,7 +1048,7 @@
 
     const titleField = document.createElement('div');
     titleField.className = 'kng-field';
-    titleField.innerHTML = '<label for="kng-title">Título *</label>';
+    titleField.appendChild(createLabel('kng-title', 'Título *'));
     const titleInput = document.createElement('input');
     titleInput.id = 'kng-title';
     titleInput.type = 'text';
@@ -1033,14 +1057,14 @@
 
     const descField = document.createElement('div');
     descField.className = 'kng-field';
-    descField.innerHTML = '<label for="kng-desc">Descrição</label>';
+    descField.appendChild(createLabel('kng-desc', 'Descrição'));
     const descInput = document.createElement('textarea');
     descInput.id = 'kng-desc';
     descField.appendChild(descInput);
 
     const tagField = document.createElement('div');
     tagField.className = 'kng-field';
-    tagField.innerHTML = '<label for="kng-tag">Tag</label>';
+    tagField.appendChild(createLabel('kng-tag', 'Tag'));
     const tagInput = document.createElement('input');
     tagInput.id = 'kng-tag';
     tagInput.type = 'text';
@@ -1128,7 +1152,7 @@
   }
 
   function renderPanelList(container, filters, onChange) {
-    container.innerHTML = '';
+    clearNode(container);
     const list = getFilteredAnnotations(filters);
 
     if (list.length === 0) {
@@ -1157,7 +1181,17 @@
         .filter(Boolean)
         .join(' · ');
 
-      main.innerHTML = `<strong>${escapeHtml(ann.title)}</strong><span class="kng-list-date">${escapeHtml(formatDisplayDate(ann.createdAt))}</span><span class="kng-list-meta">${escapeHtml(meta)}</span>`;
+      const strong = document.createElement('strong');
+      strong.textContent = ann.title;
+      const dateSpan = document.createElement('span');
+      dateSpan.className = 'kng-list-date';
+      dateSpan.textContent = formatDisplayDate(ann.createdAt);
+      const metaSpan = document.createElement('span');
+      metaSpan.className = 'kng-list-meta';
+      metaSpan.textContent = meta;
+      main.appendChild(strong);
+      main.appendChild(dateSpan);
+      main.appendChild(metaSpan);
       main.addEventListener('click', (e) => {
         stopKngEvent(e);
         navigateToAnnotation(ann);
@@ -1186,14 +1220,6 @@
     container.appendChild(ul);
   }
 
-  function escapeHtml(str) {
-    return String(str)
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
-  }
-
   function openPanel() {
     if (ui.panel) return;
     closeCreateModal();
@@ -1210,17 +1236,17 @@
 
     const panel = document.createElement('div');
     panel.className = 'kng-panel';
-    panel.innerHTML = '<h2>Anotações</h2>';
+    panel.appendChild(createHeading('h2', 'Anotações'));
 
     const filterBar = document.createElement('div');
     filterBar.className = 'kng-filters';
 
     const siteWrap = document.createElement('div');
     siteWrap.className = 'kng-field';
-    siteWrap.innerHTML = '<label for="kng-filter-site">Site</label>';
+    siteWrap.appendChild(createLabel('kng-filter-site', 'Site'));
     const siteSelect = document.createElement('select');
     siteSelect.id = 'kng-filter-site';
-    siteSelect.innerHTML = '<option value="">Todos</option>';
+    siteSelect.appendChild(createOption('', 'Todos'));
     hostnames.forEach((h) => {
       const opt = document.createElement('option');
       opt.value = h;
@@ -1231,10 +1257,11 @@
 
     const tagWrap = document.createElement('div');
     tagWrap.className = 'kng-field';
-    tagWrap.innerHTML = '<label for="kng-filter-tag">Tag</label>';
+    tagWrap.appendChild(createLabel('kng-filter-tag', 'Tag'));
     const tagSelect = document.createElement('select');
     tagSelect.id = 'kng-filter-tag';
-    tagSelect.innerHTML = '<option value="">Todas</option><option value="__none__">Sem tag</option>';
+    tagSelect.appendChild(createOption('', 'Todas'));
+    tagSelect.appendChild(createOption('__none__', 'Sem tag'));
     tags.forEach((t) => {
       const opt = document.createElement('option');
       opt.value = t;
@@ -1538,17 +1565,24 @@
     detail.className = 'kng-pin-detail';
     detail.dataset.kngFor = annotation.id;
 
-    const parts = [];
-    if (annotation.description) parts.push(`<p>${escapeHtml(annotation.description)}</p>`);
+    detail.appendChild(createHeading('h3', annotation.title));
+    if (annotation.description) {
+      const desc = document.createElement('p');
+      desc.textContent = annotation.description;
+      detail.appendChild(desc);
+    }
     const meta = [
       annotation.tag || null,
       annotation.videoTimestamp != null ? formatTimestamp(annotation.videoTimestamp) : null,
     ]
       .filter(Boolean)
       .join(' · ');
-    if (meta) parts.push(`<div class="kng-pin-meta">${escapeHtml(meta)}</div>`);
-
-    detail.innerHTML = `<h3>${escapeHtml(annotation.title)}</h3>${parts.join('')}`;
+    if (meta) {
+      const metaEl = document.createElement('div');
+      metaEl.className = 'kng-pin-meta';
+      metaEl.textContent = meta;
+      detail.appendChild(metaEl);
+    }
     detail.addEventListener('click', stopKngEvent);
 
     let left;
