@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KNotaçõesG
 // @namespace    https://github.com/Caio-Angelis/knotacoesg
-// @version      1.1.0
+// @version      1.2.0
 // @description  Anotações globais em qualquer site
 // @author       Caio-Angelis
 // @match        *://*/*
@@ -313,7 +313,7 @@
     fab: null,
     fabMenu: null,
     overlay: null,
-    hoverTarget: null,
+    clickCursor: null,
     clickModeActive: false,
     pending: null,
     createModal: null,
@@ -333,11 +333,14 @@
 
   // ─── UI HELPERS ───────────────────────────────────────────────────────────
 
+  const KNG_UI_SELECTOR =
+    '#kng-fab, .kng-fab-menu, #kng-overlay, #kng-markers-layer, .kng-modal-backdrop, .kng-pin, .kng-pin-detail, .kng-toast';
+
   function isKngNode(el) {
     if (!el || el.nodeType !== Node.ELEMENT_NODE) return false;
     if (el.id === 'kng-styles' || el.id === 'kng-fab' || el.id === 'kng-overlay' || el.id === 'kng-markers-layer') return true;
-    if (el.classList && Array.from(el.classList).some((c) => c.startsWith('kng-'))) return true;
-    return el.closest ? !!el.closest('[class*="kng-"], #kng-fab, #kng-overlay') : false;
+    if (el.closest && el.closest(KNG_UI_SELECTOR)) return true;
+    return false;
   }
 
   function stopKngEvent(e) {
@@ -353,6 +356,34 @@
       hour: '2-digit',
       minute: '2-digit',
     });
+  }
+
+  function documentSize() {
+    const el = document.documentElement;
+    return {
+      width: Math.max(el.scrollWidth, el.clientWidth, 1),
+      height: Math.max(el.scrollHeight, el.clientHeight, 1),
+    };
+  }
+
+  function pageToNormalized(pageX, pageY) {
+    const size = documentSize();
+    return {
+      x: pageX / size.width,
+      y: pageY / size.height,
+    };
+  }
+
+  function normalizedToViewport(normX, normY) {
+    const size = documentSize();
+    return {
+      left: normX * size.width - window.scrollX,
+      top: normY * size.height - window.scrollY,
+    };
+  }
+
+  function isPointAnchor(anchor) {
+    return anchor && anchor.type === 'point' && typeof anchor.x === 'number' && typeof anchor.y === 'number';
   }
 
   function buildAnnotationUrl(annotation) {
@@ -485,9 +516,29 @@
         z-index: 2147483645 !important;
         pointer-events: none !important;
       }
-      .kng-hover-target {
-        outline: 2px solid #e6a817 !important;
-        outline-offset: 2px !important;
+      .kng-click-cursor {
+        position: fixed !important;
+        width: 20px !important;
+        height: 20px !important;
+        border: 2px solid #e6a817 !important;
+        border-radius: 50% !important;
+        pointer-events: none !important;
+        transform: translate(-50%, -50%) !important;
+        z-index: 2147483646 !important;
+        box-shadow: 0 0 0 2px rgba(230,168,23,0.35) !important;
+      }
+      .kng-point-pulse {
+        position: fixed !important;
+        width: 24px !important;
+        height: 24px !important;
+        border-radius: 50% !important;
+        pointer-events: none !important;
+        transform: translate(-50%, -50%) !important;
+        z-index: 2147483647 !important;
+        animation: kng-pulse 1s ease-in-out 3 !important;
+        outline: none !important;
+        background: rgba(230,168,23,0.35) !important;
+        border: 3px solid #e6a817 !important;
       }
       .kng-modal-backdrop {
         position: fixed !important;
@@ -666,7 +717,7 @@
 
     const btnNew = document.createElement('button');
     btnNew.type = 'button';
-    btnNew.textContent = 'Nova anotação (clique)';
+    btnNew.textContent = 'Nova anotação';
     btnNew.addEventListener('click', (e) => {
       stopKngEvent(e);
       closeFabMenu();
@@ -706,38 +757,24 @@
     return fab;
   }
 
-  // ─── CLICK MODE ───────────────────────────────────────────────────────────
+  // ─── CLICK MODE (posição livre na página) ─────────────────────────────────
 
-  function clearHoverTarget() {
-    if (ui.hoverTarget) {
-      ui.hoverTarget.classList.remove('kng-hover-target');
-      ui.hoverTarget = null;
-    }
+  function updateClickCursor(clientX, clientY) {
+    if (!ui.clickCursor) return;
+    ui.clickCursor.style.left = `${clientX}px`;
+    ui.clickCursor.style.top = `${clientY}px`;
   }
 
-  function setHoverTarget(el) {
-    if (ui.hoverTarget === el) return;
-    clearHoverTarget();
-    if (el && !isKngNode(el)) {
-      ui.hoverTarget = el;
-      el.classList.add('kng-hover-target');
+  function removeClickCursor() {
+    if (ui.clickCursor) {
+      ui.clickCursor.remove();
+      ui.clickCursor = null;
     }
-  }
-
-  function resolveClickTarget(el) {
-    let node = el;
-    while (node && node !== document.documentElement) {
-      if (isKngNode(node)) return null;
-      const tag = node.tagName;
-      if (tag === 'HTML' || tag === 'BODY') return null;
-      return node;
-    }
-    return null;
   }
 
   function exitClickMode() {
     ui.clickModeActive = false;
-    clearHoverTarget();
+    removeClickCursor();
     if (ui.overlay) {
       ui.overlay.remove();
       ui.overlay = null;
@@ -753,6 +790,21 @@
     }
   }
 
+  function handlePointClick(pageX, pageY) {
+    const norm = pageToNormalized(pageX, pageY);
+    ui.pending = {
+      id: generateId(),
+      anchor: {
+        type: 'point',
+        x: norm.x,
+        y: norm.y,
+        selector: '',
+        markerId: '',
+      },
+    };
+    openCreateModal();
+  }
+
   function enterClickMode() {
     if (ui.clickModeActive) return;
     closeCreateModal();
@@ -764,28 +816,32 @@
     document.body.appendChild(overlay);
     ui.overlay = overlay;
 
+    const cursor = document.createElement('div');
+    cursor.className = 'kng-click-cursor';
+    cursor.setAttribute('aria-hidden', 'true');
+    document.body.appendChild(cursor);
+    ui.clickCursor = cursor;
+
+    showToast('Clique em qualquer lugar da página para anotar. Esc para cancelar.');
+
     const onMove = (e) => {
       if (!ui.clickModeActive) return;
-      const raw = document.elementFromPoint(e.clientX, e.clientY);
-      setHoverTarget(resolveClickTarget(raw));
+      updateClickCursor(e.clientX, e.clientY);
     };
 
     const onClick = (e) => {
       if (!ui.clickModeActive) return;
       if (isKngNode(e.target)) return;
       stopKngEvent(e);
-      const target = resolveClickTarget(e.target);
-      if (!target) {
-        showToast('Selecione um elemento da página');
-        return;
-      }
-      handleElementClick(target);
+      const pageX = e.clientX + window.scrollX;
+      const pageY = e.clientY + window.scrollY;
+      handlePointClick(pageX, pageY);
     };
 
     const onEsc = (e) => {
       if (e.key === 'Escape') {
         exitClickMode();
-        showToast('Modo clique cancelado');
+        showToast('Modo anotação cancelado');
       }
     };
 
@@ -794,14 +850,6 @@
     document.addEventListener('mousemove', onMove, true);
     document.addEventListener('click', onClick, true);
     document.addEventListener('keydown', onEsc, true);
-  }
-
-  function handleElementClick(el) {
-    const id = generateId();
-    const selector = generateSelector(el);
-    injectEphemeralMarker(el, id);
-    ui.pending = { el, selector, markerId: id, id };
-    openCreateModal();
   }
 
   // ─── CREATE MODAL ─────────────────────────────────────────────────────────
@@ -880,10 +928,7 @@
         description: descInput.value.trim(),
         tag: tagVal || null,
         videoTimestamp: video ? video.currentTime : null,
-        anchor: {
-          selector: ui.pending.selector,
-          markerId: ui.pending.markerId,
-        },
+        anchor: ui.pending.anchor,
       });
       closeCreateModal();
       exitClickMode();
@@ -1122,7 +1167,16 @@
 
   function updateMarkerPositions() {
     if (!ui.markerEntries) return;
-    ui.markerEntries.forEach(({ pin, el }) => {
+    ui.markerEntries.forEach((entry) => {
+      const { pin } = entry;
+      if (entry.type === 'point') {
+        const pos = normalizedToViewport(entry.anchor.x, entry.anchor.y);
+        pin.hidden = false;
+        pin.style.left = `${pos.left}px`;
+        pin.style.top = `${pos.top}px`;
+        return;
+      }
+      const { el } = entry;
       if (!el.isConnected) {
         pin.hidden = true;
         return;
@@ -1138,7 +1192,7 @@
     document.querySelectorAll('.kng-pin-detail').forEach((el) => el.remove());
   }
 
-  function showPinDetail(annotation, anchorEl) {
+  function showPinDetail(annotation, anchorInfo) {
     closePinDetail();
     const detail = document.createElement('div');
     detail.className = 'kng-pin-detail';
@@ -1156,9 +1210,19 @@
     detail.innerHTML = `<h3>${escapeHtml(annotation.title)}</h3>${parts.join('')}`;
     detail.addEventListener('click', stopKngEvent);
 
-    const rect = anchorEl.getBoundingClientRect();
-    detail.style.left = `${Math.min(rect.left, window.innerWidth - 300)}px`;
-    detail.style.top = `${Math.min(rect.bottom + 8, window.innerHeight - 120)}px`;
+    let left;
+    let top;
+    if (anchorInfo.type === 'point') {
+      const pos = normalizedToViewport(anchorInfo.anchor.x, anchorInfo.anchor.y);
+      left = pos.left;
+      top = pos.top + 16;
+    } else {
+      const rect = anchorInfo.el.getBoundingClientRect();
+      left = rect.left;
+      top = rect.bottom + 8;
+    }
+    detail.style.left = `${Math.min(left, window.innerWidth - 300)}px`;
+    detail.style.top = `${Math.min(top, window.innerHeight - 120)}px`;
     document.body.appendChild(detail);
 
     setTimeout(() => {
@@ -1184,21 +1248,32 @@
     ui.markerEntries = [];
 
     annotations.forEach((ann) => {
-      const el = resolveAnnotationElement(ann);
-      if (!el || isKngNode(el)) return;
-
       const pin = document.createElement('button');
       pin.type = 'button';
       pin.className = 'kng-pin';
       pin.title = ann.title;
       pin.textContent = ann.title;
+
+      if (isPointAnchor(ann.anchor)) {
+        pin.addEventListener('click', (e) => {
+          stopKngEvent(e);
+          showPinDetail(ann, { type: 'point', anchor: ann.anchor });
+        });
+        layer.appendChild(pin);
+        ui.markerEntries.push({ pin, type: 'point', anchor: ann.anchor });
+        return;
+      }
+
+      const el = resolveAnnotationElement(ann);
+      if (!el || isKngNode(el)) return;
+
       pin.addEventListener('click', (e) => {
         stopKngEvent(e);
-        showPinDetail(ann, el);
+        showPinDetail(ann, { type: 'element', el });
       });
 
       layer.appendChild(pin);
-      ui.markerEntries.push({ pin, el });
+      ui.markerEntries.push({ pin, el, type: 'element' });
     });
 
     if (ui.markerEntries.length === 0) {
@@ -1258,6 +1333,26 @@
     setTimeout(cleanup, 3100);
   }
 
+  function highlightPoint(anchor) {
+    const size = documentSize();
+    const pageX = anchor.x * size.width;
+    const pageY = anchor.y * size.height;
+    window.scrollTo({
+      left: Math.max(0, pageX - window.innerWidth / 2),
+      top: Math.max(0, pageY - window.innerHeight / 2),
+      behavior: 'smooth',
+    });
+
+    const pulse = document.createElement('div');
+    pulse.className = 'kng-point-pulse';
+    const pos = normalizedToViewport(anchor.x, anchor.y);
+    pulse.style.left = `${pos.left}px`;
+    pulse.style.top = `${pos.top}px`;
+    document.body.appendChild(pulse);
+    pulse.addEventListener('animationend', () => pulse.remove(), { once: true });
+    setTimeout(() => pulse.remove(), 3100);
+  }
+
   function tryHighlightFromHash() {
     const id = parseHashId();
     if (!id) return true;
@@ -1265,6 +1360,16 @@
     const annotation = findAnnotationById(id);
     if (!annotation) {
       showToast('Anotação não encontrada');
+      return true;
+    }
+
+    if (isPointAnchor(annotation.anchor)) {
+      if (annotation.videoTimestamp != null) {
+        const video = findNativeVideo();
+        if (video) seekVideo(video, annotation.videoTimestamp);
+      }
+      highlightPoint(annotation.anchor);
+      log('highlight point', annotation.id);
       return true;
     }
 
@@ -1290,6 +1395,8 @@
       if (fn()) return;
       if (step >= delays.length) {
         if (parseHashId()) {
+          const ann = findAnnotationById(parseHashId());
+          if (ann && isPointAnchor(ann.anchor)) return;
           showToast('Elemento não encontrado — a página pode ter mudado');
         }
         return;
