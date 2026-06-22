@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KNotaçõesG
 // @namespace    https://github.com/Caio-Angelis/knotacoesg
-// @version      1.3.0
+// @version      1.4.0
 // @description  Anotações globais em qualquer site
 // @author       Caio-Angelis
 // @match        *://*/*
@@ -82,17 +82,33 @@
       title: payload.title || '',
       description: payload.description || '',
       tag: payload.tag || null,
-      url: location.href,
+      url: normalizePageUrl(location.href),
       hostname: location.hostname,
       createdAt: Date.now(),
       videoTimestamp: payload.videoTimestamp ?? null,
-      anchor: payload.anchor || { selector: '', markerId: '' },
+      anchor: payload.anchor || { type: 'point', x: 0, y: 0, selector: '', markerId: '' },
     };
     const list = loadAnnotations();
     list.push(annotation);
     saveAnnotations(list);
     log('createAnnotation', annotation);
     return annotation;
+  }
+
+  function updateAnnotationAnchor(id, x, y) {
+    const list = loadAnnotations();
+    const idx = list.findIndex((a) => a.id === id);
+    if (idx === -1) return null;
+    const prev = list[idx].anchor || {};
+    list[idx].anchor = {
+      ...prev,
+      type: 'point',
+      x,
+      y,
+    };
+    saveAnnotations(list);
+    log('updateAnnotationAnchor', id, x, y);
+    return list[idx];
   }
 
   function deleteAnnotation(id) {
@@ -356,6 +372,10 @@
       hour: '2-digit',
       minute: '2-digit',
     });
+  }
+
+  function normalizePageUrl(url = location.href) {
+    return String(url || '').split('#')[0];
   }
 
   function documentSize() {
@@ -670,14 +690,22 @@
         border-radius: 999px !important;
         font: 12px/1.3 system-ui, sans-serif !important;
         font-weight: 600 !important;
-        cursor: pointer !important;
+        cursor: grab !important;
         box-shadow: 0 2px 8px rgba(0,0,0,0.25) !important;
         white-space: nowrap !important;
         overflow: hidden !important;
         text-overflow: ellipsis !important;
         transform: translate(-50%, -50%) !important;
+        user-select: none !important;
+        touch-action: none !important;
       }
       .kng-pin:hover { background: #f0bc2a !important; }
+      .kng-pin.kng-pin-dragging {
+        cursor: grabbing !important;
+        z-index: 2147483647 !important;
+        opacity: 0.92 !important;
+        box-shadow: 0 4px 16px rgba(0,0,0,0.35) !important;
+      }
       .kng-pin-detail {
         position: fixed !important;
         width: min(280px, calc(100vw - 32px)) !important;
@@ -977,7 +1005,7 @@
         return;
       }
       const tagVal = tagInput.value.trim();
-      createAnnotation({
+      const ann = createAnnotation({
         id: ui.pending.id,
         title,
         description: descInput.value.trim(),
@@ -987,7 +1015,7 @@
       });
       closeCreateModal();
       exitClickMode();
-      renderPageMarkers();
+      addSingleMarker(ann);
       showToast('Anotação salva');
     });
 
@@ -1185,12 +1213,12 @@
   // ─── PAGE MARKERS (anotações visíveis na tela) ────────────────────────────
 
   function currentPageUrl() {
-    return location.href.split('#')[0];
+    return normalizePageUrl(location.href);
   }
 
   function getAnnotationsForCurrentPage() {
     const page = currentPageUrl();
-    return loadAnnotations().filter((a) => String(a.url || '').split('#')[0] === page);
+    return loadAnnotations().filter((a) => normalizePageUrl(a.url) === page);
   }
 
   function clearPageMarkers() {
@@ -1207,6 +1235,147 @@
       ui.markerScrollHandler = null;
     }
     ui.markerEntries = null;
+  }
+
+  function ensureMarkerScrollHandler() {
+    if (ui.markerScrollHandler) return;
+    ui.markerScrollHandler = () => updateMarkerPositions();
+    window.addEventListener('scroll', ui.markerScrollHandler, true);
+    window.addEventListener('resize', ui.markerScrollHandler);
+  }
+
+  function setupPinDrag(pin, entry) {
+    const DRAG_THRESHOLD = 5;
+
+    const finishDrag = (moved, e) => {
+      pin.classList.remove('kng-pin-dragging');
+      document.removeEventListener('mousemove', onMove, true);
+      document.removeEventListener('mouseup', onEnd, true);
+      document.removeEventListener('touchmove', onMove, true);
+      document.removeEventListener('touchend', onEnd, true);
+      document.removeEventListener('touchcancel', onEnd, true);
+
+      if (moved && entry.annotationId) {
+        const updated = updateAnnotationAnchor(entry.annotationId, entry.anchor.x, entry.anchor.y);
+        if (updated) entry.annotation = updated;
+      } else if (!moved) {
+        showPinDetail(entry.annotation, { type: 'point', anchor: entry.anchor });
+      }
+      if (e) stopKngEvent(e);
+    };
+
+    let moved = false;
+    let startX = 0;
+    let startY = 0;
+
+    const onMove = (ev) => {
+      const cx = ev.clientX ?? ev.touches?.[0]?.clientX;
+      const cy = ev.clientY ?? ev.touches?.[0]?.clientY;
+      if (cx == null || cy == null) return;
+
+      if (Math.abs(cx - startX) + Math.abs(cy - startY) > DRAG_THRESHOLD) {
+        moved = true;
+        closePinDetailFor(entry.annotationId);
+      }
+
+      const pageX = cx + window.scrollX;
+      const pageY = cy + window.scrollY;
+      const norm = pageToNormalized(pageX, pageY);
+      entry.anchor.x = norm.x;
+      entry.anchor.y = norm.y;
+
+      const pos = normalizedToViewport(norm.x, norm.y);
+      pin.style.left = `${pos.left}px`;
+      pin.style.top = `${pos.top}px`;
+
+      if (ev.cancelable && ev.type === 'touchmove') ev.preventDefault();
+    };
+
+    const onEnd = (ev) => {
+      finishDrag(moved, ev);
+    };
+
+    const startDrag = (clientX, clientY, e) => {
+      if (ui.clickModeActive) return;
+      stopKngEvent(e);
+
+      moved = false;
+      startX = clientX;
+      startY = clientY;
+      pin.classList.add('kng-pin-dragging');
+
+      document.addEventListener('mousemove', onMove, true);
+      document.addEventListener('mouseup', onEnd, true);
+      document.addEventListener('touchmove', onMove, { passive: false, capture: true });
+      document.addEventListener('touchend', onEnd, true);
+      document.addEventListener('touchcancel', onEnd, true);
+    };
+
+    pin.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      startDrag(e.clientX, e.clientY, e);
+    });
+
+    pin.addEventListener(
+      'touchstart',
+      (e) => {
+        const t = e.touches[0];
+        if (!t) return;
+        startDrag(t.clientX, t.clientY, e);
+      },
+      { passive: false }
+    );
+  }
+
+  function createPinElement(ann) {
+    const pin = document.createElement('button');
+    pin.type = 'button';
+    pin.className = 'kng-pin';
+    pin.dataset.kngPinId = ann.id;
+    pin.title = `${ann.title} — arraste para mover`;
+    pin.textContent = ann.title;
+
+    const entry = {
+      pin,
+      type: 'point',
+      annotationId: ann.id,
+      annotation: ann,
+      anchor: {
+        type: 'point',
+        x: ann.anchor.x,
+        y: ann.anchor.y,
+      },
+    };
+
+    setupPinDrag(pin, entry);
+    return { pin, entry };
+  }
+
+  function addSingleMarker(ann) {
+    if (!ann || !isPointAnchor(ann.anchor)) {
+      scheduleRenderPageMarkers();
+      return;
+    }
+    if (normalizePageUrl(ann.url) !== currentPageUrl()) return;
+
+    const layer = ensureMarkersLayer();
+    if (!ui.markerEntries) ui.markerEntries = [];
+
+    const existing = ui.markerEntries.find((e) => e.annotationId === ann.id);
+    if (existing) {
+      existing.annotation = ann;
+      existing.anchor.x = ann.anchor.x;
+      existing.anchor.y = ann.anchor.y;
+      updateMarkerPositions();
+      return;
+    }
+
+    const { pin, entry } = createPinElement(ann);
+    layer.appendChild(pin);
+    ui.markerEntries.push(entry);
+    updateMarkerPositions();
+    ensureMarkerScrollHandler();
+    if (ui.clickModeActive) layer.hidden = true;
   }
 
   function ensureMarkersLayer() {
@@ -1247,10 +1416,17 @@
     document.querySelectorAll('.kng-pin-detail').forEach((el) => el.remove());
   }
 
+  function closePinDetailFor(annotationId) {
+    document
+      .querySelectorAll(`.kng-pin-detail[data-kng-for="${annotationId}"]`)
+      .forEach((el) => el.remove());
+  }
+
   function showPinDetail(annotation, anchorInfo) {
-    closePinDetail();
+    closePinDetailFor(annotation.id);
     const detail = document.createElement('div');
     detail.className = 'kng-pin-detail';
+    detail.dataset.kngFor = annotation.id;
 
     const parts = [];
     if (annotation.description) parts.push(`<p>${escapeHtml(annotation.description)}</p>`);
@@ -1284,7 +1460,10 @@
       document.addEventListener(
         'click',
         function closeOnOutside(e) {
-          if (!detail.contains(e.target) && !e.target.classList.contains('kng-pin')) {
+          if (
+            !detail.contains(e.target) &&
+            !e.target.closest(`.kng-pin[data-kng-pin-id="${annotation.id}"]`)
+          ) {
             detail.remove();
             document.removeEventListener('click', closeOnOutside, true);
           }
@@ -1303,24 +1482,22 @@
     ui.markerEntries = [];
 
     annotations.forEach((ann) => {
-      const pin = document.createElement('button');
-      pin.type = 'button';
-      pin.className = 'kng-pin';
-      pin.title = ann.title;
-      pin.textContent = ann.title;
-
       if (isPointAnchor(ann.anchor)) {
-        pin.addEventListener('click', (e) => {
-          stopKngEvent(e);
-          showPinDetail(ann, { type: 'point', anchor: ann.anchor });
-        });
+        const { pin, entry } = createPinElement(ann);
         layer.appendChild(pin);
-        ui.markerEntries.push({ pin, type: 'point', anchor: ann.anchor });
+        ui.markerEntries.push(entry);
         return;
       }
 
       const el = resolveAnnotationElement(ann);
       if (!el || isKngNode(el)) return;
+
+      const pin = document.createElement('button');
+      pin.type = 'button';
+      pin.className = 'kng-pin';
+      pin.dataset.kngPinId = ann.id;
+      pin.title = ann.title;
+      pin.textContent = ann.title;
 
       pin.addEventListener('click', (e) => {
         stopKngEvent(e);
@@ -1328,7 +1505,7 @@
       });
 
       layer.appendChild(pin);
-      ui.markerEntries.push({ pin, el, type: 'element' });
+      ui.markerEntries.push({ pin, el, type: 'element', annotationId: ann.id, annotation: ann });
     });
 
     if (ui.markerEntries.length === 0) {
@@ -1337,9 +1514,11 @@
     }
 
     updateMarkerPositions();
-    ui.markerScrollHandler = () => updateMarkerPositions();
-    window.addEventListener('scroll', ui.markerScrollHandler, true);
-    window.addEventListener('resize', ui.markerScrollHandler);
+    ensureMarkerScrollHandler();
+    if (ui.clickModeActive) {
+      const markersLayer = document.getElementById('kng-markers-layer');
+      if (markersLayer) markersLayer.hidden = true;
+    }
   }
 
   function scheduleRenderPageMarkers() {
