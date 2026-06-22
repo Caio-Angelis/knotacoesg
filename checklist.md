@@ -270,9 +270,9 @@
 
 ## Fase 12 — Publicação
 
-- [ ] **12.1** Commit `knotacoes.user.js` no repositório
-- [ ] **12.2** URL raw do GitHub funcional (`raw.githubusercontent.com/...`)
-- [ ] **12.3** Atualizar `@updateURL` e `@downloadURL` no script
+- [x] **12.1** Commit `knotacoes.user.js` no repositório
+- [x] **12.2** URL raw do GitHub funcional (`raw.githubusercontent.com/...`)
+- [x] **12.3** Atualizar `@updateURL` e `@downloadURL` no script
 - [x] **12.4** Bump `@version` seguindo semver (`1.0.0` → `1.0.1` para fixes) — *versão `1.0.0` release inicial*
 - [ ] **12.5** Instalar via URL no Tampermonkey de uma máquina limpa — smoke test T1–T3 *(manual)*
 
@@ -315,4 +315,4 @@ Metadados → Storage → generateSelector → Video utils → CSS
 - [x] Todas as fases 1–11 concluídas *(código; testes manuais T1–T17 pendentes)*
 - [ ] Matriz de testes T1–T17 com ✓ *(manual)*
 - [x] Limitações documentadas no código
-- [ ] `@updateURL` apontando para URL real (fase 12)
+- [x] `@updateURL` apontando para URL real (fase 12)
